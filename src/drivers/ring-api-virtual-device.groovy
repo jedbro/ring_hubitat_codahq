@@ -21,6 +21,7 @@
  *              Support for the Ring Flood & Freeze Sensor
  *              Updated to the documented location of the websocket client
  *              Added an informational log when the websocket timeout it received
+ * 2020-12-02   Fix bug with how device data fields are set. Caused device commands to fail in hubitat v2.2.4 (jbrown, thanks to cmorse)
  *
  */
 
@@ -640,9 +641,22 @@ def createDevice(deviceInfo) {
   logDebug "createDevice(deviceInfo)"
   logTrace "deviceInfo: ${deviceInfo}"
 
-  if (deviceInfo == null || deviceInfo.deviceType == null || DEVICE_TYPES[deviceInfo.deviceType] == null || DEVICE_TYPES[deviceInfo.deviceType].hidden) {
+  //quick check
+  if (deviceInfo == null
+    || deviceInfo.deviceType == null
+    || DEVICE_TYPES[deviceInfo.deviceType] == null
+    || DEVICE_TYPES[deviceInfo.deviceType].hidden) {
     logDebug "Not a creatable device. ${deviceInfo.deviceType}"
     return
+  }
+
+  //deeper check to enable auto-create on initialize
+  if (!isHub(deviceInfo.deviceType)) {
+    def parentKind = state.hubs.find { it.zid == deviceInfo.src }.kind
+    if (!state.createableHubs.contains(parentKind)) {
+      logDebug "not creating ${deviceInfo.name} because parent ${parentKind} is not creatable!"
+      return
+    }
   }
 
   def d = getChildDevices()?.find {
@@ -652,31 +666,36 @@ def createDevice(deviceInfo) {
     //devices that have drivers that store in devices
     log.warn "Creating a ${DEVICE_TYPES[deviceInfo.deviceType].name} (${deviceInfo.deviceType}) with dni: ${getFormattedDNI(deviceInfo.zid)}"
     try {
+      d = addChildDevice("ring-hubitat-codahq", DEVICE_TYPES[deviceInfo.deviceType].name, getFormattedDNI(deviceInfo.zid), data)
+      d.label = deviceInfo.name ?: DEVICE_TYPES[deviceInfo.deviceType].name
 
-      def data = [
-        "zid": deviceInfo.zid,
-        "fingerprint": deviceInfo.fingerprint ?: "N/A",
-        "manufacturer": deviceInfo.manufacturerName ?: "Ring",
-        "serial": deviceInfo.serialNumber ?: "N/A",
-        "type": deviceInfo.deviceType,
-        "src": deviceInfo.src
-      ]
+      d.updateDataValue("zid",  deviceInfo.zid)
+      d.updateDataValue("fingerprint", deviceInfo.fingerprint ?: "N/A")
+      d.updateDataValue("manufacturer", deviceInfo.manufacturerName ?: "Ring")
+      d.updateDataValue("serial", deviceInfo.serialNumber ?: "N/A")
+      d.updateDataValue("type", deviceInfo.deviceType)
+      d.updateDataValue("src", deviceInfo.src)
+
       //if (sensor.general.v2.deviceType == "security-panel") {
-      //  data << ["hub-zid": hubNode.general.v2.zid]
+      //  d.updateDataValue("hub-zid", hubNode.general.v2.zid)
       //}
 
-      d = addChildDevice("codahq-hubitat", DEVICE_TYPES[deviceInfo.deviceType].name, getFormattedDNI(deviceInfo.zid), data)
-      d.label = deviceInfo.name ?: DEVICE_TYPES[deviceInfo.deviceType].name
-      log.warn "Succesfully added ${deviceInfo.deviceType} with dni: ${getFormattedDNI(deviceInfo.zid)}"
+      log.warn "Successfully added ${deviceInfo.deviceType} with dni: ${getFormattedDNI(deviceInfo.zid)}"
     }
     catch (e) {
-      log.error "An error occured ${e}"
+      if (e.toString().replace(DEVICE_TYPES[deviceInfo.deviceType].name, "") ==
+        "com.hubitat.app.exception.UnknownDeviceTypeException: Device type '' in namespace 'ring-hubitat-codahq' not found") {
+        log.error '<b style="color: red;">The "' + DEVICE_TYPES[deviceInfo.deviceType].name + '" driver was not found and needs to be installed.</b>\r\n'
+      }
+      else {
+        log.error "Error adding device: ${e}"
+      }
     }
   }
   else {
     logDebug "Device ${d} already exists. No need to create."
   }
-
+  return d
 }
 
 def sendUpdate(deviceInfo) {
@@ -702,6 +721,18 @@ def sendUpdate(deviceInfo) {
   else {
     logDebug "Updating device ${d}"
     d.setValues(deviceInfo)
+    
+    // Old versions set device data fields incorrectly. Hubitat v2.2.4 appears to clean up
+    // the bad data fields. Reproduce the necessary fields
+    if (d.getDataValue('zid') == null) {
+      log.warn "Device ${d} is missing 'zid' data field. Attempting to fix"
+      d.updateDataValue("zid",  deviceInfo.zid)
+      d.updateDataValue("fingerprint", deviceInfo.fingerprint ?: "N/A")
+      d.updateDataValue("manufacturer", deviceInfo.manufacturerName ?: "Ring")
+      d.updateDataValue("serial", deviceInfo.serialNumber ?: "N/A")
+      d.updateDataValue("type", deviceInfo.deviceType)
+      d.updateDataValue("src", deviceInfo.src)
+    }
   }
 }
 
